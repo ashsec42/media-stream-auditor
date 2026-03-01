@@ -16,55 +16,75 @@ def load_config():
 def scan():
     config = load_config()
     start_id = config.get("start_id")
-    folder_id = config.get("folder_id")
-    scan_range = config.get("range", 50)
+    # We now take a list of folders or a range to check
+    current_folder = config.get("folder_id") 
+    scan_range = config.get("range", 2000) # Default to large range
     templates = config.get("url_templates", [])
-    output_file = config.get("output_file", "found_videos.csv")
+    output_file = config.get("output_file", "all_videos.csv")
     headers = config.get("headers", {})
 
-    print(f"Scanning ID: {start_id} +/- {scan_range}")
-    print(f"Fixed Folder: {folder_id}")
+    print(f"--- STARTING MASSIVE SCAN ---")
+    print(f"Video IDs: {start_id} to {start_id + scan_range}")
+    print(f"Starting Folder: {current_folder} (Will auto-adjust)")
 
     with open(output_file, mode='w', newline='', encoding='utf-8') as file:
         writer = csv.writer(file)
-        writer.writerow(["ID", "Folder", "Type", "Working URL"])
+        writer.writerow(["Video ID", "Folder ID", "Type", "Stream URL"])
 
         with requests.Session() as session:
             session.headers.update(headers)
 
-            for video_id in range(start_id - scan_range, start_id + scan_range + 1):
-                found_for_this_id = False
+            # Loop through a HUGE range of video IDs
+            for video_id in range(start_id, start_id + scan_range + 1):
+                found_flag = False
+                
+                # ADAPTIVE FOLDER LOGIC:
+                # We check the 'current' folder first. 
+                # If that fails, we quickly check neighbor folders (current-1, current+1, current+2)
+                # If we find a video in a new folder, we update 'current_folder' to stick to it.
+                
+                # Define which folders to check for THIS video ID
+                folders_to_check = [current_folder, current_folder + 1, current_folder - 1, current_folder + 2]
+                
+                for folder_try in folders_to_check:
+                    if found_flag: break # Stop if we already found it
 
-                # Loop through every URL template you provided
-                for template in templates:
-                    # Inject Folder ID and Video ID into the link
-                    url = template.format(folder=folder_id, id=video_id)
+                    for template in templates:
+                        url = template.format(folder=folder_try, id=video_id)
+                        
+                        try:
+                            # Fast check (HEAD request or stream=True)
+                            response = session.get(url, stream=True, timeout=1.5)
+                            
+                            if response.status_code == 200:
+                                # Determine type
+                                link_type = "Recorded" if "recordedvideos" in url else "Livestream"
+                                if "amazonaws" in url: link_type = "AWS Backup"
 
-                    try:
-                        # Use stream=True to check headers without downloading
-                        response = session.get(url, stream=True, timeout=2)
+                                print(f"[+] FOUND: Video {video_id} | Folder {folder_try} | {link_type}")
+                                writer.writerow([video_id, folder_try, link_type, url])
+                                
+                                # CRITICAL: If the folder changed (e.g. from 645 to 646),
+                                # update 'current_folder' so the next video checks 646 first!
+                                if folder_try != current_folder:
+                                    print(f"    >>> Switching main folder to {folder_try}")
+                                    current_folder = folder_try
+                                
+                                found_flag = True
+                                break # Found correct template
 
-                        if response.status_code == 200:
-                            # Identify the type based on the URL text
-                            link_type = "Unknown"
-                            if "recordedvideos" in url: link_type = "Recorded"
-                            elif "livestream" in url: link_type = "Livestream"
-                            elif "amazonaws" in url: link_type = "AWS Backup"
+                        except Exception:
+                            pass
+                
+                if not found_flag:
+                    # Optional: Print only every 10 misses to keep logs clean
+                    if video_id % 10 == 0:
+                        print(f"[-] Scanned {video_id}... (No hit)")
 
-                            print(f"[+] FOUND: {video_id} ({link_type})")
-                            writer.writerow([video_id, folder_id, link_type, url])
-                            found_for_this_id = True
-                            break # Found one working link, stop checking others for this ID
+                # Very short delay to speed up processing
+                time.sleep(0.05)
 
-                    except Exception:
-                        pass 
-
-                if not found_for_this_id:
-                    print(f"[-] Missing: {video_id}")
-
-                time.sleep(0.1)
-
-    print(f"\nScan complete. Results saved to {output_file}")
+    print(f"\nScan complete. Check {output_file}")
 
 if __name__ == "__main__":
     scan()
